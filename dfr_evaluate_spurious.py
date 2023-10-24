@@ -13,7 +13,7 @@ from collections import defaultdict
 import json
 from functools import partial
 import pickle
-
+import random
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
@@ -33,17 +33,30 @@ REG = "l1"
 CLASS_WEIGHT_OPTIONS = [{0: 1, 1: w} for w in CLASS_WEIGHT_OPTIONS] + [
         {0: w, 1: 1} for w in CLASS_WEIGHT_OPTIONS]
 
+# set random seed
+SEED = 130
+def set_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed (seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+set_seed(SEED)
+
+
 
 parser = argparse.ArgumentParser(description="Tune and evaluate DFR.")
 parser.add_argument(
     "--data_dir", type=str,
-    default=None,
+    default='/home/f_hosseini/parsa/data/waterbirds/waterbird_complete95_forest2water2/',
     help="Train dataset directory")
 parser.add_argument(
-    "--result_path", type=str, default="logs/",
+    "--result_path", type=str, default="logs/log1.pkl",
     help="Path to save results")
 parser.add_argument(
-    "--ckpt_path", type=str, default=None, help="Checkpoint path")
+    "--ckpt_path", type=str, default='/home/f_hosseini/parsa/models/100resnet50_erm_ll.model',
+    help="Checkpoint path")
 parser.add_argument(
     "--batch_size", type=int, default=100, required=False,
     help="Checkpoint path")
@@ -331,14 +344,42 @@ val_loader = get_loader(
     valset, train=False, reweight_groups=None, reweight_classes=None,
     **loader_kwargs)
 
+
 # Load model
+def load_checkpoint(model, checkpoint_path: str):
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(checkpoint_path)
+    else:
+        state = torch.load(checkpoint_path)
+        i = 0
+        if isinstance(model, torch.nn.DataParallel):
+            model_dict = model.module.state_dict()
+        else:
+            model_dict = model.state_dict()
+        model_keys = list(model_dict.keys())
+        state_temp = state
+        if 'model' in state.keys():
+            state_temp = state['model']
+        for key in list(state_temp.keys()):
+            if i < len(model_keys) and model_keys[i] in key:
+                model_dict[model_keys[i]] = state_temp[key]
+                i += 1
+        if isinstance(model, torch.nn.DataParallel):
+            model.module.load_state_dict(model_dict)
+        else:
+            model.load_state_dict(model_dict)
+        del state
+        torch.cuda.empty_cache()
+        return model
+
 n_classes = trainset.n_classes
 model = torchvision.models.resnet50(pretrained=False)
 d = model.fc.in_features
 model.fc = torch.nn.Linear(d, n_classes)
-model.load_state_dict(torch.load(
-    args.ckpt_path
-))
+# model.load_state_dict(torch.load(
+#     args.ckpt_path
+# ))
+model = load_checkpoint(model, checkpoint_path=args.ckpt_path)
 model.cuda()
 model.eval()
 
@@ -406,6 +447,9 @@ dfr_val_results["test_mean_acc"] = test_mean_acc
 print(dfr_val_results)
 print()
 
+worst_gacc = dfr_val_results["test_worst_acc"]
+mean_gacc = test_mean_acc
+
 # DFR on train subsampled
 print("DFR on train subsampled")
 dfr_train_results = {}
@@ -432,3 +476,6 @@ print(all_results)
 
 with open(args.result_path, 'wb') as f:
     pickle.dump(all_results, f)
+
+
+print(SEED, worst_gacc, mean_gacc)
