@@ -19,7 +19,8 @@ from sklearn.preprocessing import StandardScaler
 
 from wb_data import WaterBirdsDataset, get_loader, get_transform_cub, log_data
 from utils import Logger, AverageMeter, set_seed, evaluate, get_y_p
-
+from metashift_data import get_metashift_loaders, prepare_confounder_data
+from domino_data import DominoeMnistCifarDataset
 
 # WaterBirds
 C_OPTIONS = [1., 0.7, 0.3, 0.1, 0.07, 0.03, 0.01]
@@ -34,7 +35,7 @@ CLASS_WEIGHT_OPTIONS = [{0: 1, 1: w} for w in CLASS_WEIGHT_OPTIONS] + [
         {0: w, 1: 1} for w in CLASS_WEIGHT_OPTIONS]
 
 # set random seed
-SEED = 130
+SEED = 50
 def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed (seed)
@@ -49,17 +50,17 @@ set_seed(SEED)
 parser = argparse.ArgumentParser(description="Tune and evaluate DFR.")
 parser.add_argument(
     "--data_dir", type=str,
-    default='/home/f_hosseini/parsa/data/waterbirds/waterbird_complete95_forest2water2/',
+    default='/home/f_hosseini/parsa/data/Domino',
     help="Train dataset directory")
 parser.add_argument(
     "--result_path", type=str, default="logs/log1.pkl",
     help="Path to save results")
 parser.add_argument(
-    "--ckpt_path", type=str, default='/home/f_hosseini/parsa/models/100resnet50_erm_ll.model',
+    "--ckpt_path", type=str, default='/home/f_hosseini/parsa/models/Dominos_ResNet50_spuriousity=0.90.pt',
     help="Checkpoint path")
 parser.add_argument(
     "--batch_size", type=int, default=100, required=False,
-    help="Checkpoint path")
+    help="Batch Size")
 parser.add_argument(
     "--balance_dfr_val", type=bool, default=True, required=False,
     help="Subset validation to have equal groups for DFR(Val)")
@@ -69,6 +70,9 @@ parser.add_argument(
 parser.add_argument(
     "--tune_class_weights_dfr_train", action='store_true',
     help="Learn class weights for DFR(Train)")
+parser.add_argument(
+    "--dataset", type=str, default='waterbirds',
+    help="Experiment Dataset")
 args = parser.parse_args()
 
 
@@ -318,31 +322,60 @@ def dfr_train_subset_eval(
 
 
 ## Load data
-target_resolution = (224, 224)
-train_transform = get_transform_cub(target_resolution=target_resolution,
-                                    train=True, augment_data=False)
-test_transform = get_transform_cub(target_resolution=target_resolution,
-                                   train=False, augment_data=False)
+if args.dataset == 'waterbirds':
+    target_resolution = (224, 224)
+    train_transform = get_transform_cub(target_resolution=target_resolution,
+                                        train=True, augment_data=False)
+    test_transform = get_transform_cub(target_resolution=target_resolution,
+                                    train=False, augment_data=False)
 
-trainset = WaterBirdsDataset(
-    basedir=args.data_dir, split="train", transform=train_transform)
-testset = WaterBirdsDataset(
-    basedir=args.data_dir, split="test", transform=test_transform)
-valset = WaterBirdsDataset(
-    basedir=args.data_dir, split="val", transform=test_transform)
+    trainset = WaterBirdsDataset(
+        basedir=args.data_dir, split="train", transform=train_transform)
+    testset = WaterBirdsDataset(
+        basedir=args.data_dir, split="test", transform=test_transform)
+    valset = WaterBirdsDataset(
+        basedir=args.data_dir, split="val", transform=test_transform)
 
-loader_kwargs = {'batch_size': args.batch_size,
-                 'num_workers': 4, 'pin_memory': True,
-                 "reweight_places": None}
-train_loader = get_loader(
-    trainset, train=True, reweight_groups=False, reweight_classes=False,
-    **loader_kwargs)
-test_loader = get_loader(
-    testset, train=False, reweight_groups=None, reweight_classes=None,
-    **loader_kwargs)
-val_loader = get_loader(
-    valset, train=False, reweight_groups=None, reweight_classes=None,
-    **loader_kwargs)
+    loader_kwargs = {'batch_size': args.batch_size,
+                    'num_workers': 4, 'pin_memory': True,
+                    "reweight_places": None}
+    train_loader = get_loader(
+        trainset, train=True, reweight_groups=False, reweight_classes=False,
+        **loader_kwargs)
+    test_loader = get_loader(
+        testset, train=False, reweight_groups=None, reweight_classes=None,
+        **loader_kwargs)
+    val_loader = get_loader(
+        valset, train=False, reweight_groups=None, reweight_classes=None,
+        **loader_kwargs)
+elif args.dataset == 'metashift':
+    train_data, val_data, test_data = prepare_confounder_data(train=True, data_dir=args.data_dir)
+
+    loader_kwargs = {'batch_size': args.batch_size, 'num_workers': 1, 'pin_memory': False}
+    train_loader = train_data.get_loader(reweight_groups=False,
+                                                train=True, **loader_kwargs)
+
+    test_loader = test_data.get_loader(train=False, reweight_groups=None, **loader_kwargs)
+    val_loader = val_data.get_loader(train=False, reweight_groups=None, **loader_kwargs)
+    trainset = train_data
+    trainset.n_places = 2
+elif args.dataset == 'domino':
+    spuriosity = 90
+    trainset = torch.load(os.path.join(args.data_dir, 'train_'+str(spuriosity)+'.pt'))
+    valset = torch.load(os.path.join(args.data_dir, 'val_'+str(spuriosity)+'.pt'))
+    testset = torch.load(os.path.join(args.data_dir, 'test_'+str(spuriosity)+'.pt'))
+
+    train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, shuffle=True, num_workers=1)
+    val_loader = torch.utils.data.DataLoader(valset, batch_size=args.batch_size, shuffle=False, drop_last = False, num_workers=1)
+    test_loader = torch.utils.data.DataLoader(testset, batch_size=args.batch_size, shuffle=False, drop_last = False, num_workers=1)
+
+    trainset.n_classes = 2
+    trainset.n_places = 2
+    trainset.n_groups = 4
+    valset.n_groups = 4
+    testset.n_groups = 4
+else:
+    raise ValueError('Invalid dataset')
 
 
 # Load model
@@ -376,10 +409,11 @@ n_classes = trainset.n_classes
 model = torchvision.models.resnet50(pretrained=False)
 d = model.fc.in_features
 model.fc = torch.nn.Linear(d, n_classes)
-# model.load_state_dict(torch.load(
-#     args.ckpt_path
-# ))
-model = load_checkpoint(model, checkpoint_path=args.ckpt_path)
+# model.load_state_dict(torch.load(args.ckpt_path))
+if args.dataset == 'metashift':
+    model = torch.load(args.ckpt_path)
+else:
+    model = load_checkpoint(model, checkpoint_path=args.ckpt_path)
 model.cuda()
 model.eval()
 
@@ -451,7 +485,7 @@ worst_gacc = dfr_val_results["test_worst_acc"]
 mean_gacc = test_mean_acc
 
 # DFR on train subsampled
-print("DFR on train subsampled")
+'''print("DFR on train subsampled")
 dfr_train_results = {}
 c, w1, w2 = dfr_train_subset_tune(
     all_embeddings, all_y, all_g,
@@ -476,6 +510,10 @@ print(all_results)
 
 with open(args.result_path, 'wb') as f:
     pickle.dump(all_results, f)
-
+'''
 
 print(SEED, worst_gacc, mean_gacc)
+
+fp = open('res.txt', 'w')
+fp.write(f'{SEED} {worst_gacc} {mean_gacc}')
+fp.close()
